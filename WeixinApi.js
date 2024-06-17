@@ -4,17 +4,15 @@
  * 1、分享到微信朋友圈
  * 2、分享给微信好友
  * 3、分享到腾讯微博
- * 4、新的分享接口，包含朋友圈、好友、微博的分享（for iOS）
- * 5、隐藏/显示右上角的菜单入口
- * 6、隐藏/显示底部浏览器工具栏
- * 7、获取当前的网络状态
- * 8、调起微信客户端的图片播放组件
- * 9、关闭公众平台Web页面
- * 10、判断当前网页是否在微信内置浏览器中打开
- * 11、增加打开扫描二维码
- * 12、支持WeixinApi的错误监控
- * 13、检测应用程序是否已经安装（需要官方开通权限）
- * 14、发送电子邮件
+ * 4、隐藏/显示右上角的菜单入口
+ * 5、隐藏/显示底部浏览器工具栏
+ * 6、获取当前的网络状态
+ * 7、调起微信客户端的图片播放组件
+ * 8、关闭公众平台Web页面
+ * 9、判断当前网页是否在微信内置浏览器中打开
+ * 10、支持WeixinApi的错误监控
+ * 11、发送电子邮件
+ * 12、禁止用户分享
  *
  * @author zhaoxianlie(http://www.baidufe.com)
  */
@@ -26,7 +24,7 @@
      * 定义WeixinApi
      */
     var WeixinApi = {
-        version: 3.7
+        version: 4.3
     };
 
     // 将WeixinApi暴露到window下：全局可使用，对旧版本向下兼容
@@ -97,26 +95,35 @@
 
             // 加工一下数据
             if (cmd.menu == 'menu:share:timeline' ||
-                (cmd.menu == 'menu:general:share' && argv.shareTo == 'timeline')) {
+                (cmd.menu == 'general:share' && argv.shareTo == 'timeline')) {
 
                 var title = theData.title;
                 theData.title = theData.desc || title;
                 theData.desc = title || theData.desc;
             }
 
-            // 新的分享接口，单独处理
-            if (cmd.menu === 'menu:general:share') {
-                // 如果是收藏操作，并且在wxCallbacks中配置了favorite为false，则不执行回调
-                if (argv.shareTo == 'favorite' || argv.scene == 'favorite') {
-                    if (callbacks.favorite === false) {
-                        return argv.generalShare(theData, function () {
-                        });
-                    }
+            // 如果是收藏操作，并且在wxCallbacks中配置了favorite为false，则不执行回调
+            if (argv && (argv.shareTo == 'favorite' || argv.scene == 'favorite')) {
+                if (callbacks.favorite === false) {
+                    WeixinJSBridge.invoke('sendAppMessage', theData, new Function());
+                } else {
+                    WeixinJSBridge.invoke(cmd.action, theData, progress);
                 }
-
-                argv.generalShare(theData, progress);
             } else {
-                WeixinJSBridge.invoke(cmd.action, theData, progress);
+                // 新的分享接口，单独处理
+                if (cmd.menu === 'general:share') {
+                    if (argv.shareTo === 'timeline') {
+                        WeixinJSBridge.invoke('shareTimeline', theData, progress);
+                    } else if (argv.shareTo === 'friend') {
+                        WeixinJSBridge.invoke('sendAppMessage', theData, progress);
+                    } else if (argv.shareTo === 'QQ') {
+                        WeixinJSBridge.invoke('shareQQ', theData, progress);
+                    } else if (argv.shareTo === 'weibo') {
+                        WeixinJSBridge.invoke('shareWeibo', theData, progress);
+                    }
+                } else {
+                    WeixinJSBridge.invoke(cmd.action, theData, progress);
+                }
             }
         };
 
@@ -222,7 +229,6 @@
         }, callbacks);
     };
 
-
     /**
      * 分享到腾讯微博
      * @param       {Object}    data       待分享的信息
@@ -268,7 +274,7 @@
      */
     WeixinApi.generalShare = function (data, callbacks) {
         _share({
-            menu: 'menu:general:share'
+            menu: 'general:share'
         }, {
             "appid": data.appId ? data.appId : '',
             "img_url": data.imgUrl,
@@ -281,26 +287,20 @@
     };
 
     /**
-     * 加关注（此功能只是暂时先加上，不过因为权限限制问题，不能用，如果你的站点是部署在*.qq.com下，也许可行）
-     * @param       {String}    appWeixinId     微信公众号ID
-     * @param       {Object}    callbacks       回调方法
-     * @p-config    {Function}  fail(resp)      失败
-     * @p-config    {Function}  confirm(resp)   成功
+     * 设置页面禁止分享：包括朋友圈、好友、腾讯微博、qq
+     * @param callback
      */
-    WeixinApi.addContact = function (appWeixinId, callbacks) {
-        callbacks = callbacks || {};
-        WeixinJSBridge.invoke("addContact", {
-            webtype: "1",
-            username: appWeixinId
-        }, function (resp) {
-            var success = !resp.err_msg || "add_contact:ok" == resp.err_msg
-                || "add_contact:added" == resp.err_msg;
-            if (success) {
-                callbacks.success && callbacks.success(resp);
-            } else {
-                callbacks.fail && callbacks.fail(resp);
-            }
-        })
+    WeixinApi.disabledShare = function (callback) {
+        callback = callback || function () {
+            alert('当前页面禁止分享！');
+        };
+        ['menu:share:timeline', 'menu:share:appmessage', 'menu:share:qq',
+            'menu:share:weibo', 'general:share'].forEach(function (menu) {
+                WeixinJSBridge.on(menu, function () {
+                    callback();
+                    return false;
+                });
+            });
     };
 
     /**
@@ -404,9 +404,38 @@
      * @param readyCallback
      */
     WeixinApi.ready = function (readyCallback) {
+
+        /**
+         * 加一个钩子，同时解决Android和iOS下的分享问题
+         * @private
+         */
+        var _hook = function () {
+            var _WeixinJSBridge = {};
+            Object.keys(WeixinJSBridge).forEach(function (key) {
+                _WeixinJSBridge[key] = WeixinJSBridge[key];
+            });
+            Object.keys(WeixinJSBridge).forEach(function (key) {
+                if (typeof WeixinJSBridge[key] === 'function') {
+                    WeixinJSBridge[key] = function () {
+                        try {
+                            var args = arguments.length > 0 ? arguments[0] : {},
+                                runOn3rd_apis = args.__params ? args.__params.__runOn3rd_apis || [] : [];
+                            ['menu:share:timeline', 'menu:share:appmessage', 'menu:share:weibo',
+                                'menu:share:qq', 'general:share'].forEach(function (menu) {
+                                    runOn3rd_apis.indexOf(menu) === -1 && runOn3rd_apis.push(menu);
+                                });
+                        } catch (e) {
+                        }
+                        return _WeixinJSBridge[key].apply(WeixinJSBridge, arguments);
+                    };
+                }
+            });
+        };
+
         if (readyCallback && typeof readyCallback == 'function') {
             var Api = this;
             var wxReadyFunc = function () {
+                _hook();
                 readyCallback(Api);
             };
             if (typeof window.WeixinJSBridge == "undefined") {
@@ -427,62 +456,6 @@
      */
     WeixinApi.openInWeixin = function () {
         return /MicroMessenger/i.test(navigator.userAgent);
-    };
-
-    /*
-     * 打开扫描二维码
-     * @param       {Object}    callbacks       回调方法
-     * @p-config    {Function}  fail(resp)      失败
-     * @p-config    {Function}  success(resp)   成功
-     */
-    WeixinApi.scanQRCode = function (callbacks) {
-        callbacks = callbacks || {};
-        WeixinJSBridge.invoke("scanQRCode", {}, function (resp) {
-            switch (resp.err_msg) {
-                // 打开扫描器成功
-                case 'scanQRCode:ok':
-                case 'scan_qrcode:ok':
-                    callbacks.success && callbacks.success(resp);
-                    break;
-
-                // 打开扫描器失败
-                default :
-                    callbacks.fail && callbacks.fail(resp);
-                    break;
-            }
-        });
-    };
-
-    /**
-     * 检测应用程序是否已安装
-     *         by mingcheng 2014-10-17
-     *
-     * @param       {Object}    data               应用程序的信息
-     * @p-config    {String}    packageUrl      应用注册的自定义前缀，如 xxx:// 就取 xxx
-     * @p-config    {String}    packageName        应用的包名
-     *
-     * @param       {Object}    callbacks       相关回调方法
-     * @p-config    {Function}  fail(resp)      失败
-     * @p-config    {Function}  success(resp)   成功，如果有对应的版本信息，则写入到 resp.version 中
-     * @p-config    {Function}  all(resp)       无论成功失败都会执行的回调
-     */
-    WeixinApi.getInstallState = function (data, callbacks) {
-        callbacks = callbacks || {};
-
-        WeixinJSBridge.invoke("getInstallState", {
-            "packageUrl": data.packageUrl || "",
-            "packageName": data.packageName || ""
-        }, function (resp) {
-            var msg = resp.err_msg, match = msg.match(/state:yes_?(.*)$/);
-            if (match) {
-                resp.version = match[1] || "";
-                callbacks.success && callbacks.success(resp);
-            } else {
-                callbacks.fail && callbacks.fail(resp);
-            }
-
-            callbacks.all && callbacks.all(resp);
-        });
     };
 
     /**
@@ -544,91 +517,24 @@
         }
     };
 
-
     /**
-     * 实在是没办法了，只能在微信内置的分享功能中加一个钩子，强行注入，并修改需要分享的内容
-     * 注意，仅Android可用，并且也不支持async模式了，暂时先这么用着吧，各位亲，总比不能用要好
+     * 通用分享，一种简便的写法
+     * @param wxData
+     * @param wxCallbacks
      */
-    WeixinApi.hook = (function () {
-        var _wxData;
-        var _callbacks;
+    WeixinApi.share = function (wxData, wxCallbacks) {
+        WeixinApi.ready(function (Api) {
+            // 用户点开右上角popup菜单后，点击分享给好友，会执行下面这个代码
+            Api.shareToFriend(wxData, wxCallbacks);
 
-        /**
-         * 开启WeixinApi的hook功能
-         */
-        var _enable = function (wxData, wxCallbacks) {
-            _wxData = wxData;
+            // 点击分享到朋友圈，会执行下面这个代码
+            Api.shareToTimeline(wxData, wxCallbacks);
 
-            // 分享过程中的一些回调
-            _callbacks = function (resp) {
-                var callbacks = wxCallbacks || {};
-                switch (true) {
-                    // 用户取消
-                    case /\:cancel$/i.test(resp.err_msg) :
-                        callbacks.cancel && callbacks.cancel(resp);
-                        break;
-                    // 发送成功
-                    case /\:(confirm|ok)$/i.test(resp.err_msg):
-                        callbacks.confirm && callbacks.confirm(resp);
-                        break;
-                    // fail　发送失败
-                    case /\:fail$/i.test(resp.err_msg) :
-                    default:
-                        callbacks.fail && callbacks.fail(resp);
-                        break;
-                }
-                // 无论成功失败都会执行的回调
-                callbacks.all && callbacks.all(resp);
-            };
-        };
+            // 点击分享到腾讯微博，会执行下面这个代码
+            Api.shareToWeibo(wxData, wxCallbacks);
 
-        /**
-         * 对内置的sendMessage加钩子
-         * @param message
-         */
-        var _message = function (message) {
-            var theData = _extend(message['__params'], _wxData);
-            theData.img_url = theData.imgUrl || theData.img_url;
-            delete theData.imgUrl;
-
-            switch (message['__event_id']) {
-                case 'menu:share:timeline':
-                    var t = theData.title;
-                    theData.title = theData.desc || t;
-                    theData.desc = t || theData.desc;
-                    message['__params'] = theData;
-                    break;
-                case 'menu:share:appmessage':
-                case 'menu:share:qq':
-                case 'menu:share:weiboApp':
-                    message['__params'] = theData;
-                    break;
-            }
-        };
-
-        /**
-         * 给各分享的回调方法加钩子
-         * @param shareType
-         * @param callback
-         */
-        var _callback = function (shareType, callback) {
-            switch (shareType) {
-                case 'sendAppMessage':
-                case 'shareTimeline':
-                case 'shareWeibo':
-                    callback = !callback ? _callbacks : function (resp) {
-                        callback(resp) && _callbacks(resp);
-                    };
-                    break;
-            }
-            return callback;
-        };
-
-        return {
-            enable: _enable,
-            message: _message,
-            callbacks: _callback
-        };
-    })();
-
+            // 分享到各渠道
+            Api.generalShare(wxData, wxCallbacks);
+        });
+    };
 })(window);
